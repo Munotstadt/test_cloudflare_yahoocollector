@@ -9,8 +9,8 @@ crons = ["*/15 * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "munotstadt_test"
-database_id = "<DEINE_D1_DATABASE_ID>"
+database_id = "4876695b-8ea2-4283-b49b-853880bbcfb9"
 
 [[hyperdrive]]
 binding = "HYPERDRIVE"
-id = "<DEINE_HYPERDRIVE_ID>"
+id = "46d4e19345cb4455b630d429b9884e2a"
