@@ -6,7 +6,7 @@ compatibility_flags = ["nodejs_compat"]
 # trigger build
 
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/15 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
