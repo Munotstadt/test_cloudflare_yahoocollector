@@ -1,7 +1,5 @@
 const COLLECTOR_ID = 2;
 const SOURCE_NAME = "YahooD1Worker";
-const MAX_RETRIES = 2;
-const BATCH_SIZE = 20; // Free-Plan-Limit: max. 50 Subrequests/Invocation
 
 export default {
   async scheduled(event, env, ctx) {
@@ -16,41 +14,34 @@ export default {
 };
 
 async function runCollector(env) {
-  const allSecurities = await fetchSecurities(env);
-  const securities = await selectBatch(env, allSecurities);
-
+  const securities = await fetchSecurities(env);
   const nowIso = new Date().toISOString().replace("T", " ").slice(0, 19);
-  let added = 0, skipped = 0, errors = 0;
+
+  const tickers = securities.map((s) => s.ticker);
+  const quotes = await fetchYahooQuotesBatch(tickers);
+
+  const toInsert = [];
   const errorDetails = [];
 
   for (const { security_id, ticker } of securities) {
-    try {
-      const price = await fetchPriceWithRetry(ticker);
-      const wasInserted = await insertPrice(env, security_id, price, nowIso);
-      if (wasInserted) added++; else skipped++;
-    } catch (e) {
-      errors++;
-      errorDetails.push({ ticker, security_id, error: String(e) });
+    const price = quotes.get(ticker);
+    if (price == null) {
+      errorDetails.push({ ticker, security_id, error: "Kein Kurs von Yahoo erhalten" });
+      continue;
     }
+    toInsert.push({ security_id, price, priceDate: nowIso });
   }
 
+  const inserted = await insertPricesBatch(env, toInsert);
+
   return {
-    added, skipped, errors, errorDetails,
-    totalSecurities: allSecurities.length,
-    processedThisRun: securities.length,
+    added: inserted,
+    skipped: toInsert.length - inserted,
+    errors: errorDetails.length,
+    errorDetails,
+    totalSecurities: securities.length,
     timestamp: nowIso,
   };
-}
-
-// Rotierendes Batching: nutzt die aktuelle Minute, um jeden Lauf einen anderen
-// Ausschnitt der Liste zu verarbeiten (grobe Rotation, kein State nötig).
-async function selectBatch(env, allSecurities) {
-  if (allSecurities.length <= BATCH_SIZE) return allSecurities;
-  const now = Date.now();
-  const cycleLength = Math.ceil(allSecurities.length / BATCH_SIZE);
-  const cycleIndex = Math.floor(now / (5 * 60 * 1000)) % cycleLength;
-  const start = cycleIndex * BATCH_SIZE;
-  return allSecurities.slice(start, start + BATCH_SIZE);
 }
 
 // --- Neon via Hyperdrive ---
@@ -69,37 +60,43 @@ async function fetchSecurities(env) {
   }
 }
 
-// --- Yahoo Finance ---
-async function fetchPriceWithRetry(ticker) {
-  let lastError;
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try { return await fetchYahooPrice(ticker); }
-    catch (e) { lastError = e; if (attempt < MAX_RETRIES) await sleep(500 * attempt); }
-  }
-  throw lastError;
-}
-
-async function fetchYahooPrice(ticker) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1d`;
-  const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0 (compatible; MunotstadtCollector/1.0)" } });
+// --- Yahoo Finance: alle Ticker in EINEM Request ---
+async function fetchYahooQuotesBatch(tickers) {
+  const symbols = tickers.join(",");
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbols)}`;
+  const res = await fetch(url, {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; MunotstadtCollector/1.0)" },
+  });
   if (!res.ok) throw new Error(`Yahoo HTTP ${res.status}`);
   const data = await res.json();
-  const price = data?.chart?.result?.[0]?.meta?.regularMarketPrice;
-  if (price == null) throw new Error("regularMarketPrice ist null/undefined");
-  return Number(price);
+  const results = data?.quoteResponse?.result || [];
+
+  const priceMap = new Map();
+  for (const r of results) {
+    if (r.symbol && r.regularMarketPrice != null) {
+      priceMap.set(r.symbol, Number(r.regularMarketPrice));
+    }
+  }
+  return priceMap;
 }
 
-function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+// --- D1: ein einziges Batch-INSERT für alle Preise ---
+async function insertPricesBatch(env, priceResults) {
+  if (priceResults.length === 0) return 0;
 
-// --- D1: INSERT OR IGNORE dank Unique Index (security_id, price_date, source) ---
-async function insertPrice(env, securityId, price, priceDate) {
+  const placeholders = priceResults.map(() => "(?, ?, ?, ?, ?, ?, ?)").join(", ");
+  const values = priceResults.flatMap((r) => [
+    r.security_id, r.price, r.price, r.priceDate, SOURCE_NAME, r.priceDate, r.priceDate,
+  ]);
+
   const result = await env.DB
     .prepare(
       `INSERT OR IGNORE INTO security_prices
         (security_id, price, price_adjusted, price_date, source, created_at, modified_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+       VALUES ${placeholders}`
     )
-    .bind(securityId, price, price, priceDate, SOURCE_NAME, priceDate, priceDate)
+    .bind(...values)
     .run();
-  return result.meta.changes > 0;
+
+  return result.meta.changes;
 }
