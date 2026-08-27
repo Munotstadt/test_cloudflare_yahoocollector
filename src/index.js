@@ -1,6 +1,7 @@
 const COLLECTOR_ID = 2;
 const SOURCE_NAME = "YahooD1Worker";
-const MAX_RETRIES = 3;
+const MAX_RETRIES = 2;
+const BATCH_SIZE = 20; // Free-Plan-Limit: max. 50 Subrequests/Invocation
 
 export default {
   async scheduled(event, env, ctx) {
@@ -15,7 +16,9 @@ export default {
 };
 
 async function runCollector(env) {
-  const securities = await fetchSecurities(env);
+  const allSecurities = await fetchSecurities(env);
+  const securities = await selectBatch(env, allSecurities);
+
   const nowIso = new Date().toISOString().replace("T", " ").slice(0, 19);
   let added = 0, skipped = 0, errors = 0;
   const errorDetails = [];
@@ -23,17 +26,31 @@ async function runCollector(env) {
   for (const { security_id, ticker } of securities) {
     try {
       const price = await fetchPriceWithRetry(ticker);
-      const exists = await priceAlreadyExists(env, security_id, nowIso);
-      if (exists) { skipped++; continue; }
-      await insertPrice(env, security_id, price, nowIso);
-      added++;
+      const wasInserted = await insertPrice(env, security_id, price, nowIso);
+      if (wasInserted) added++; else skipped++;
     } catch (e) {
       errors++;
       errorDetails.push({ ticker, security_id, error: String(e) });
     }
   }
 
-  return { added, skipped, errors, errorDetails, timestamp: nowIso };
+  return {
+    added, skipped, errors, errorDetails,
+    totalSecurities: allSecurities.length,
+    processedThisRun: securities.length,
+    timestamp: nowIso,
+  };
+}
+
+// Rotierendes Batching: nutzt die aktuelle Minute, um jeden Lauf einen anderen
+// Ausschnitt der Liste zu verarbeiten (grobe Rotation, kein State nötig).
+async function selectBatch(env, allSecurities) {
+  if (allSecurities.length <= BATCH_SIZE) return allSecurities;
+  const now = Date.now();
+  const cycleLength = Math.ceil(allSecurities.length / BATCH_SIZE);
+  const cycleIndex = Math.floor(now / (15 * 60 * 1000)) % cycleLength;
+  const start = cycleIndex * BATCH_SIZE;
+  return allSecurities.slice(start, start + BATCH_SIZE);
 }
 
 // --- Neon via Hyperdrive ---
@@ -57,7 +74,7 @@ async function fetchPriceWithRetry(ticker) {
   let lastError;
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try { return await fetchYahooPrice(ticker); }
-    catch (e) { lastError = e; if (attempt < MAX_RETRIES) await sleep(1000 * attempt); }
+    catch (e) { lastError = e; if (attempt < MAX_RETRIES) await sleep(500 * attempt); }
   }
   throw lastError;
 }
@@ -74,21 +91,15 @@ async function fetchYahooPrice(ticker) {
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-// --- D1 ---
-async function priceAlreadyExists(env, securityId, priceDate) {
-  const row = await env.DB
-    .prepare(`SELECT 1 FROM security_prices WHERE security_id = ? AND price_date = ? AND source = ? LIMIT 1`)
-    .bind(securityId, priceDate, SOURCE_NAME)
-    .first();
-  return !!row;
-}
-
+// --- D1: INSERT OR IGNORE dank Unique Index (security_id, price_date, source) ---
 async function insertPrice(env, securityId, price, priceDate) {
-  await env.DB
+  const result = await env.DB
     .prepare(
-      `INSERT INTO security_prices (security_id, price, price_adjusted, price_date, source, created_at, modified_at)
+      `INSERT OR IGNORE INTO security_prices
+        (security_id, price, price_adjusted, price_date, source, created_at, modified_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(securityId, price, price, priceDate, SOURCE_NAME, priceDate, priceDate)
     .run();
+  return result.meta.changes > 0;
 }
