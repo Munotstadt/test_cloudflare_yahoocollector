@@ -48,7 +48,7 @@ async function selectBatch(env, allSecurities) {
   if (allSecurities.length <= BATCH_SIZE) return allSecurities;
   const now = Date.now();
   const cycleLength = Math.ceil(allSecurities.length / BATCH_SIZE);
-  const cycleIndex = Math.floor(now / (15 * 60 * 1000)) % cycleLength;
+  const cycleIndex = Math.floor(now / (5 * 60 * 1000)) % cycleLength;
   const start = cycleIndex * BATCH_SIZE;
   return allSecurities.slice(start, start + BATCH_SIZE);
 }
