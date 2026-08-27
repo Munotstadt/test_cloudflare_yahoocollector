@@ -1,0 +1,16 @@
+name = "test-yahoo-collector-0300-2200-utc"
+main = "src/index.js"
+compatibility_date = "2026-08-27"
+compatibility_flags = ["nodejs_compat"]
+
+[triggers]
+crons = ["*/15 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "munotstadt_test"
+database_id = "<DEINE_D1_DATABASE_ID>"
+
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "<DEINE_HYPERDRIVE_ID>"
