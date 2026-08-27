@@ -1,0 +1,8 @@
+{
+  "name": "test-yahoo-collector-0300-2200-utc",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "postgres": "^3.4.4"
+  }
+}
